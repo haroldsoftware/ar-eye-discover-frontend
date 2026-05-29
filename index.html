@@ -527,7 +527,8 @@
 
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
-const BACKEND_URL = "https://ar-eye-backend-389205780371.us-east1.run.app";
+const IS_TEST = false
+const BACKEND_URL = IS_TEST ? "http://localhost:3001" : "https://ar-eye-backend-389205780371.us-east1.run.app";
 const CAPTURE_WIDTH = 512;  // resize before sending to API
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -663,19 +664,30 @@ function captureFrame() {
 }
 
 function displayResult(data) {
-  const model = data.model || {};
+  const model = data.model || null;
+  const objectName = data.object || "Object";
+  const cacheLabel = data.fromCache ? " [CACHED]" : "";
 
   // Populate info card
-  cardIcon.textContent     = model.icon     || "🔍";
-  cardLabel.textContent    = (model.label   || data.object || "Object").toUpperCase();
-  cardCategory.textContent = model.category || "OBJECT";
-  cardDesc.textContent     = data.description || model.description || "";
-  metaCatTag.textContent   = model.category || "UNKNOWN";
+  cardIcon.textContent     = "🔍";
+  cardLabel.textContent    = objectName.toUpperCase();
+  cardCategory.textContent = model ? "3D MODEL FOUND" : "NO MODEL FOUND";
+  cardDesc.textContent     = data.description || "No description available.";
+  metaCatTag.textContent   = model ? model.name.substring(0, 22) : "SKETCHFAB: NO RESULTS";
 
-  // Load 3D model
-  if (model.modelUrl) {
-    modelViewer.setAttribute("src", model.modelUrl);
-    modelViewer.setAttribute("alt", `3D model of ${model.label}`);
+  // Update status tag with cache indicator
+  document.getElementById("meta-ai").textContent = `AI IDENTIFIED${cacheLabel}`;
+
+  // Load 3D model via backend proxy (avoids CORS on Sketchfab CDN)
+  if (model && model.proxyUrl) {
+    const fullUrl = `${BACKEND_URL}${model.proxyUrl}`;
+    modelViewer.setAttribute("src", fullUrl);
+    modelViewer.setAttribute("alt", `3D model: ${model.name}`);
+    document.getElementById("model-container").style.display = "block";
+  } else {
+    // No model found — hide the viewer
+    document.getElementById("model-container").style.display = "none";
+    modelViewer.setAttribute("src", "");
   }
 
   hideLoading();
