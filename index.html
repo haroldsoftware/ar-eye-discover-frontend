@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AR-Eye — Object Recognition Demo</title>
+
+  <!-- model-viewer web component -->
+  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
+
+  <style>
+    /* ── Reset & base ──────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --accent:    #00f5d4;
+      --accent2:   #7b2fff;
+      --bg:        #060c14;
+      --surface:   rgba(6, 20, 38, 0.88);
+      --border:    rgba(0, 245, 212, 0.25);
+      --text:      #e0f4ff;
+      --text-dim:  rgba(224, 244, 255, 0.55);
+      --danger:    #ff4c6a;
+      --hud-font:  'Courier New', monospace;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--hud-font);
+      overflow: hidden;
+      user-select: none;
+    }
+
+    /* ── Layout ────────────────────────────────────────────────────────────── */
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    /* ── Top HUD bar ───────────────────────────────────────────────────────── */
+    #hud-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      z-index: 10;
+      flex-shrink: 0;
+    }
+
+    .hud-logo {
+      font-size: 1.2rem;
+      font-weight: bold;
+      letter-spacing: 0.15em;
+      color: var(--accent);
+      text-shadow: 0 0 12px var(--accent);
+    }
+    .hud-logo span { color: var(--text-dim); font-weight: normal; }
+
+    .hud-status {
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      color: var(--text-dim);
+    }
+    .hud-status .dot {
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      margin-right: 6px;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    /* ── Main viewport area ────────────────────────────────────────────────── */
+    #viewport {
+      position: relative;
+      flex: 1;
+      overflow: hidden;
+      cursor: crosshair;
+    }
+
+    /* Camera feed */
+    #camera-feed {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transform: scaleX(-1); /* mirror selfie */
+    }
+
+    /* Scan-line effect */
+    #viewport::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        rgba(0, 245, 212, 0.018) 3px,
+        rgba(0, 245, 212, 0.018) 4px
+      );
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    /* Corner frame decorations */
+    #viewport::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border: 1px solid var(--border);
+      pointer-events: none;
+      z-index: 3;
+    }
+
+    .corner {
+      position: absolute;
+      width: 24px; height: 24px;
+      border-color: var(--accent);
+      border-style: solid;
+      z-index: 4;
+      pointer-events: none;
+    }
+    .corner.tl { top: 12px;    left: 12px;   border-width: 2px 0 0 2px; }
+    .corner.tr { top: 12px;    right: 12px;  border-width: 2px 2px 0 0; }
+    .corner.bl { bottom: 12px; left: 12px;   border-width: 0 0 2px 2px; }
+    .corner.br { bottom: 12px; right: 12px;  border-width: 0 2px 2px 0; }
+
+    /* Click ripple */
+    .ripple {
+      position: absolute;
+      width: 60px; height: 60px;
+      border-radius: 50%;
+      border: 2px solid var(--accent);
+      box-shadow: 0 0 16px var(--accent);
+      transform: translate(-50%, -50%) scale(0);
+      animation: rippleAnim 0.6s ease-out forwards;
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    @keyframes rippleAnim {
+      to { transform: translate(-50%, -50%) scale(1.6); opacity: 0; }
+    }
+
+    /* Crosshair target */
+    #crosshair {
+      position: absolute;
+      width: 48px; height: 48px;
+      border: 1.5px solid var(--accent);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 5;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    #crosshair::before, #crosshair::after {
+      content: '';
+      position: absolute;
+      background: var(--accent);
+    }
+    #crosshair::before { left: 50%; top: -8px; width: 1px; height: 64px; transform: translateX(-50%); }
+    #crosshair::after  { top: 50%; left: -8px; height: 1px; width: 64px; transform: translateY(-50%); }
+
+    #viewport:hover #crosshair { opacity: 0.7; }
+
+    /* Hidden canvas for frame capture */
+    #capture-canvas { display: none; }
+
+    /* ── AR Overlay panel ──────────────────────────────────────────────────── */
+    #ar-overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      display: none;
+      z-index: 10;
+      pointer-events: none;
+    }
+    #ar-overlay.visible { display: flex; }
+
+    /* 3D model viewer */
+    #model-container {
+      position: absolute;
+      right: 0; bottom: 0;
+      width: 50%;
+      height: 80%;
+      pointer-events: auto;
+    }
+
+    model-viewer {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      --poster-color: transparent;
+    }
+
+    /* Info card */
+    #info-card {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      width: 280px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 16px;
+      backdrop-filter: blur(16px);
+      pointer-events: auto;
+      box-shadow: 0 0 30px rgba(0, 245, 212, 0.1),
+                  inset 0 0 30px rgba(0, 0, 0, 0.3);
+      animation: slideIn 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(-16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .card-icon {
+      font-size: 1.6rem;
+      line-height: 1;
+    }
+
+    .card-title-block {}
+
+    .card-label {
+      font-size: 1rem;
+      font-weight: bold;
+      color: var(--accent);
+      text-shadow: 0 0 8px var(--accent);
+      letter-spacing: 0.08em;
+    }
+
+    .card-category {
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+
+    .card-desc {
+      font-size: 0.72rem;
+      line-height: 1.6;
+      color: var(--text-dim);
+      margin-bottom: 14px;
+    }
+
+    .card-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .meta-tag {
+      font-size: 0.6rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 3px 7px;
+      color: var(--text-dim);
+    }
+
+    .meta-tag.highlight {
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 6px rgba(0, 245, 212, 0.2);
+    }
+
+    /* Close button */
+    #btn-close {
+      position: absolute;
+      top: 10px; right: 10px;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      font-family: var(--hud-font);
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      cursor: pointer;
+      letter-spacing: 0.1em;
+      pointer-events: auto;
+      transition: border-color 0.2s, color 0.2s;
+      border-radius: 2px;
+    }
+    #btn-close:hover { border-color: var(--danger); color: var(--danger); }
+
+    /* ── Loading overlay ───────────────────────────────────────────────────── */
+    #loading-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(6, 12, 20, 0.75);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 20;
+      backdrop-filter: blur(4px);
+    }
+    #loading-overlay.visible { display: flex; }
+
+    .spinner {
+      width: 48px; height: 48px;
+      border: 2px solid rgba(0, 245, 212, 0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      box-shadow: 0 0 16px var(--accent);
+      margin-bottom: 16px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loading-text {
+      font-size: 0.75rem;
+      letter-spacing: 0.2em;
+      color: var(--accent);
+      text-shadow: 0 0 8px var(--accent);
+      animation: blink 1.2s ease-in-out infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    /* ── Error toast ───────────────────────────────────────────────────────── */
+    #error-toast {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255, 76, 106, 0.15);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      padding: 10px 20px;
+      border-radius: 3px;
+      z-index: 30;
+      display: none;
+      backdrop-filter: blur(8px);
+      max-width: 90%;
+      text-align: center;
+    }
+    #error-toast.visible { display: block; animation: fadeUp 0.3s ease-out; }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translate(-50%, 12px); }
+      to   { opacity: 1; transform: translate(-50%, 0); }
+    }
+
+    /* ── Bottom HUD bar ────────────────────────────────────────────────────── */
+    #hud-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 20px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      z-index: 10;
+      flex-shrink: 0;
+      gap: 20px;
+    }
+
+    .hud-hint {
+      font-size: 0.65rem;
+      letter-spacing: 0.12em;
+      color: var(--text-dim);
+      text-transform: uppercase;
+    }
+    .hud-hint strong { color: var(--accent); }
+
+    /* ── No-camera state ───────────────────────────────────────────────────── */
+    #no-camera {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      z-index: 6;
+      background: var(--bg);
+    }
+
+    #no-camera p {
+      color: var(--text-dim);
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+    }
+
+    #btn-camera {
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      font-family: var(--hud-font);
+      font-size: 0.8rem;
+      letter-spacing: 0.15em;
+      padding: 10px 24px;
+      cursor: pointer;
+      text-transform: uppercase;
+      border-radius: 3px;
+      box-shadow: 0 0 16px rgba(0, 245, 212, 0.2);
+      transition: background 0.2s, box-shadow 0.2s;
+    }
+    #btn-camera:hover {
+      background: rgba(0, 245, 212, 0.08);
+      box-shadow: 0 0 24px rgba(0, 245, 212, 0.35);
+    }
+  </style>
+</head>
+
+<body>
+<div id="app">
+
+  <!-- ── Top HUD ─────────────────────────────────────────────────────────── -->
+  <header id="hud-top">
+    <div class="hud-logo">AR<span>-</span>EYE <span style="font-size:0.75rem">// OBJECT RECOGNITION</span></div>
+    <div class="hud-status">
+      <span class="dot"></span>
+      <span id="status-text">INITIALIZING</span>
+    </div>
+  </header>
+
+  <!-- ── Viewport ────────────────────────────────────────────────────────── -->
+  <div id="viewport">
+
+    <!-- Corner decorations -->
+    <div class="corner tl"></div>
+    <div class="corner tr"></div>
+    <div class="corner bl"></div>
+    <div class="corner br"></div>
+
+    <!-- Camera crosshair (follows mouse) -->
+    <div id="crosshair"></div>
+
+    <!-- Camera video stream -->
+    <video id="camera-feed" autoplay playsinline muted></video>
+
+    <!-- Hidden canvas for frame capture -->
+    <canvas id="capture-canvas"></canvas>
+
+    <!-- No-camera prompt -->
+    <div id="no-camera">
+      <div style="font-size:2.5rem; text-shadow: 0 0 20px var(--accent); color: var(--accent);">👁</div>
+      <p>CAMERA ACCESS REQUIRED</p>
+      <button id="btn-camera" onclick="startCamera()">ACTIVATE CAMERA</button>
+    </div>
+
+    <!-- AR Overlay (model + info card) -->
+    <div id="ar-overlay">
+      <div id="info-card">
+        <div class="card-header">
+          <div class="card-icon" id="card-icon">🔍</div>
+          <div class="card-title-block">
+            <div class="card-label" id="card-label">OBJECT</div>
+            <div class="card-category" id="card-category">CATEGORY</div>
+          </div>
+        </div>
+        <p class="card-desc" id="card-desc">Analyzing object…</p>
+        <div class="card-meta">
+          <div class="meta-tag highlight" id="meta-ai">AI IDENTIFIED</div>
+          <div class="meta-tag" id="meta-cat-tag">—</div>
+          <div class="meta-tag">AR-EYE v1.0</div>
+        </div>
+      </div>
+
+      <button id="btn-close" onclick="closeOverlay()">✕ CLOSE</button>
+
+      <div id="model-container">
+        <model-viewer
+          id="model-viewer"
+          src=""
+          alt="3D model of detected object"
+          auto-rotate
+          camera-controls
+          shadow-intensity="0"
+          exposure="0.8"
+          style="--progress-bar-color: #00f5d4;"
+        ></model-viewer>
+      </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div id="loading-overlay">
+      <div class="spinner"></div>
+      <div class="loading-text" id="loading-text">SCANNING OBJECT</div>
+    </div>
+
+    <!-- Error toast -->
+    <div id="error-toast" id="error-toast"></div>
+
+  </div>
+
+  <!-- ── Bottom HUD ───────────────────────────────────────────────────────── -->
+  <footer id="hud-bottom">
+    <span class="hud-hint"><strong>CLICK</strong> anywhere on the feed to identify an object</span>
+    <span class="hud-hint" style="opacity:0.4">|</span>
+    <span class="hud-hint">Drag to rotate <strong>3D model</strong></span>
+  </footer>
+
+</div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────
+const BACKEND_URL = "http://localhost:3001";
+const CAPTURE_WIDTH = 512;  // resize before sending to API
+
+// ── State ───────────────────────────────────────────────────────────────────
+let stream = null;
+
+// ── DOM refs ─────────────────────────────────────────────────────────────────
+const video        = document.getElementById("camera-feed");
+const canvas       = document.getElementById("capture-canvas");
+const noCameraDiv  = document.getElementById("no-camera");
+const viewport     = document.getElementById("viewport");
+const arOverlay    = document.getElementById("ar-overlay");
+const modelViewer  = document.getElementById("model-viewer");
+const loadingOl    = document.getElementById("loading-overlay");
+const loadingText  = document.getElementById("loading-text");
+const errorToast   = document.getElementById("error-toast");
+const statusText   = document.getElementById("status-text");
+const crosshair    = document.getElementById("crosshair");
+
+// Info card
+const cardIcon     = document.getElementById("card-icon");
+const cardLabel    = document.getElementById("card-label");
+const cardCategory = document.getElementById("card-category");
+const cardDesc     = document.getElementById("card-desc");
+const metaCatTag   = document.getElementById("meta-cat-tag");
+
+// ── Camera ───────────────────────────────────────────────────────────────────
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    video.style.display = "block";
+    noCameraDiv.style.display = "none";
+    setStatus("LIVE");
+  } catch (err) {
+    // Try without facingMode constraint (desktop)
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      video.srcObject = stream;
+      video.style.display = "block";
+      noCameraDiv.style.display = "none";
+      setStatus("LIVE");
+    } catch (err2) {
+      showError("Camera access denied. Please allow camera permissions and reload.");
+    }
+  }
+}
+
+// Auto-start camera on load
+window.addEventListener("load", () => {
+  setStatus("INITIALIZING");
+  setTimeout(startCamera, 400);
+});
+
+// ── Crosshair follows mouse ───────────────────────────────────────────────────
+viewport.addEventListener("mousemove", e => {
+  const rect = viewport.getBoundingClientRect();
+  crosshair.style.left = (e.clientX - rect.left) + "px";
+  crosshair.style.top  = (e.clientY - rect.top)  + "px";
+});
+
+// ── Click to identify ─────────────────────────────────────────────────────────
+viewport.addEventListener("click", async e => {
+  if (!stream || loadingOl.classList.contains("visible")) return;
+  if (e.target.closest("#ar-overlay") || e.target.closest("#btn-close")) return;
+
+  spawnRipple(e);
+  await identifyAtClick();
+});
+
+function spawnRipple(e) {
+  const rect = viewport.getBoundingClientRect();
+  const r = document.createElement("div");
+  r.className = "ripple";
+  r.style.left = (e.clientX - rect.left) + "px";
+  r.style.top  = (e.clientY - rect.top)  + "px";
+  viewport.appendChild(r);
+  r.addEventListener("animationend", () => r.remove());
+}
+
+// ── Capture + identify ────────────────────────────────────────────────────────
+async function identifyAtClick() {
+  showLoading("SCANNING OBJECT");
+  hideError();
+
+  // Capture current video frame
+  const base64 = captureFrame();
+  if (!base64) {
+    hideLoading();
+    showError("Could not capture video frame.");
+    return;
+  }
+
+  try {
+    showLoading("QUERYING AI");
+    const response = await fetch(`${BACKEND_URL}/identify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: base64, mediaType: "image/jpeg" })
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error || `Server error ${response.status}`);
+    }
+
+    const data = await response.json();
+    showLoading("LOADING 3D MODEL");
+    displayResult(data);
+
+  } catch (err) {
+    hideLoading();
+    showError(`Recognition failed: ${err.message}`);
+    setStatus("ERROR");
+    setTimeout(() => setStatus("LIVE"), 3000);
+  }
+}
+
+function captureFrame() {
+  if (!video.videoWidth) return null;
+  const aspect = video.videoHeight / video.videoWidth;
+  canvas.width  = CAPTURE_WIDTH;
+  canvas.height = Math.round(CAPTURE_WIDTH * aspect);
+  const ctx = canvas.getContext("2d");
+  // Un-mirror for the API (the video is CSS-mirrored)
+  ctx.translate(canvas.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  // Return base64 without data URL prefix
+  return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+}
+
+function displayResult(data) {
+  const model = data.model || {};
+
+  // Populate info card
+  cardIcon.textContent     = model.icon     || "🔍";
+  cardLabel.textContent    = (model.label   || data.object || "Object").toUpperCase();
+  cardCategory.textContent = model.category || "OBJECT";
+  cardDesc.textContent     = data.description || model.description || "";
+  metaCatTag.textContent   = model.category || "UNKNOWN";
+
+  // Load 3D model
+  if (model.modelUrl) {
+    modelViewer.setAttribute("src", model.modelUrl);
+    modelViewer.setAttribute("alt", `3D model of ${model.label}`);
+  }
+
+  hideLoading();
+  arOverlay.classList.add("visible");
+  setStatus("OBJECT DETECTED");
+}
+
+// ── Close overlay ─────────────────────────────────────────────────────────────
+function closeOverlay() {
+  arOverlay.classList.remove("visible");
+  modelViewer.setAttribute("src", "");
+  setStatus("LIVE");
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function showLoading(msg) {
+  loadingText.textContent = msg;
+  loadingOl.classList.add("visible");
+}
+function hideLoading() {
+  loadingOl.classList.remove("visible");
+}
+
+function showError(msg) {
+  errorToast.textContent = "⚠ " + msg;
+  errorToast.classList.add("visible");
+  setTimeout(hideError, 5000);
+}
+function hideError() {
+  errorToast.classList.remove("visible");
+}
+
+function setStatus(text) {
+  statusText.textContent = text;
+}
+
+// ── Keyboard shortcut: Esc to close ──────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeOverlay();
+});
+</script>
+</body>
+</html>
